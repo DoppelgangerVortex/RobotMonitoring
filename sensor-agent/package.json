@@ -1,0 +1,25 @@
+{
+  "name": "arduino-sensor-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An AI agent that receives Arduino sensor readings, identifies the sensors, and explains the readings with warnings.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "selftest": "node scripts/selftest.ts"
+  },
+  "dependencies": {
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.8.0"
+  }
+}

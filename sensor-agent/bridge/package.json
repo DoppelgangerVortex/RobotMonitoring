@@ -1,0 +1,15 @@
+{
+  "name": "sensor-agent-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reads an Arduino over USB serial and forwards each line to the sensor agent.",
+  "type": "module",
+  "scripts": {
+    "start": "node bridge.mjs",
+    "list": "node bridge.mjs --list",
+    "simulate": "node simulate.mjs"
+  },
+  "dependencies": {
+    "serialport": ">=12.0.0"
+  }
+}
