@@ -64,15 +64,15 @@ ol{padding-left:22px}li{margin:6px 0}
   <span class="badge">NO ASSESSMENT</span>
   <p class="reason">No assessment yet.</p>
 </div>
-<small>With forwarding enabled, the latest fresh reading is sent once per second. The agent assesses every 10 forwarded readings by default. It sends readings to Anthropic and automatically records warning and critical results on Solana devnet, where they are public. Stop forwarding to stop sending new data; an in-progress request may still finish. This page cannot retrieve the Arduino's source code.</small>
+<small>With forwarding enabled, the latest fresh reading is sent once per second. The agent assesses every 10 forwarded readings by default, using Claude if it has an API key (readings are then sent to Anthropic) or its built-in rules if not. It automatically records warning and critical results on Solana devnet, where they are public. Stop forwarding to stop sending new data; an in-progress request may still finish. This page cannot retrieve the Arduino's source code.</small>
 
 <details id="howto">
 <summary>How to start the agent</summary>
 <ol>
-<li>Install the packages once: <code>pip install anthropic pyserial solana solders</code></li>
-<li>Set your Claude API key in the terminal: <code>export ANTHROPIC_API_KEY=your_key</code> (Windows: <code>set ANTHROPIC_API_KEY=your_key</code>)</li>
-<li>Start the agent: <code>python Agent.py --listen 8765</code> and leave that terminal open. Add <code>--no-chain</code> to skip Solana while testing.</li>
-<li>In a second terminal, in the folder with this file: <code>python -m http.server 8000</code>, then open <a href="http://localhost:8000/dashboard.html">http://localhost:8000/dashboard.html</a> in Chrome or Edge.</li>
+<li>Install the packages once: <code>python3 -m pip install pyserial solana solders</code> (Windows: <code>py -m pip install pyserial solana solders</code>)</li>
+<li>Optional, for Claude's explanations: <code>pip install anthropic</code> and set <code>ANTHROPIC_API_KEY</code> in the terminal. Without a key the agent uses its built-in rules.</li>
+<li>Start the agent: <code>python3 Agent.py --listen 8765</code> (Windows: <code>py Agent.py --listen 8765</code>) and leave that terminal open. Add <code>--no-chain</code> to skip Solana while testing.</li>
+<li>In a second terminal, in the folder with this file: <code>python3 -m http.server 8000</code> (Windows: <code>py -m http.server 8000</code>), then open <a href="http://localhost:8000/dashboard.html">http://localhost:8000/dashboard.html</a> in Chrome or Edge.</li>
 <li>Close the Arduino IDE's Serial Monitor, click <b>Connect Arduino</b>, then <b>Start forwarding to agent</b>.</li>
 </ol>
 </details>
@@ -227,7 +227,12 @@ function showAssessment(result) {
 
   const meta = add('div', 'meta');
   const item = (text) => { const s = document.createElement('span'); s.textContent = text; meta.append(s); return s; };
-  if (result.assessed_at) item(`Assessed ${new Date(result.assessed_at).toLocaleTimeString()} from ${result.readings_assessed} readings`);
+  if (result.assessed_at) {
+    const by = result.engine === 'rules' ? ' by built-in rules' : result.engine === 'claude' ? ' by Claude' : '';
+    item(`Assessed${by} at ${new Date(result.assessed_at).toLocaleTimeString()} from ${result.readings_assessed} readings`);
+  } else if (result.engine === 'rules') {
+    item('Using built-in rules (no API key)');
+  }
   if (typeof result.events_received === 'number') item(`${result.events_received} readings received`);
   if (result.signature) {
     const s = item('Recorded on Solana: ');
@@ -265,7 +270,7 @@ el('startAgent').addEventListener('click', async () => {
   } catch (error) {
     if (generation !== agentGeneration) return;
     forwarding = false;
-    el('agentStatus').textContent = `Agent unavailable: ${error.message}. Start it with "python Agent.py --listen 8765" and leave that terminal open (see "How to start the agent" below).`;
+    el('agentStatus').textContent = `Agent unavailable: ${error.message}. Start it with "python3 Agent.py --listen 8765" (Windows: "py Agent.py --listen 8765") and leave that terminal open (see "How to start the agent" below).`;
     el('howto').open = true;
   } finally { agentBusy = false; updateControls(); }
 });
