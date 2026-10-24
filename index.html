@@ -1,69 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Monitoring</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:850px;margin:40px auto;padding:0 20px;background:#f4f7fb;color:#18283b}section{background:white;border:1px solid #dce3ec;border-radius:12px;padding:22px;margin:18px 0}button,input{font:inherit;padding:10px;margin:5px 0}button{cursor:pointer}button:disabled{cursor:default;opacity:.5}label{display:block;margin:12px 0}input[type=url],input[type=password]{display:block;width:95%}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7fb;padding:12px}small{color:#526477}#buttonState{font-size:24px}a{color:#165bc4}
+</style>
+</head>
+<body>
+<h1>Robot Monitoring</h1>
+<p>Live Arduino readings and an AI assessment of recent activity.</p>
+<section>
+<h2>Device</h2>
 <button id="connect">Connect Arduino</button>
-<p id="status">Disconnected</p>
-
+<button id="disconnect" disabled>Disconnect</button>
+<p id="status" role="status">Disconnected</p>
+<p id="buttonState">Button state unknown</p>
+<small id="sampleCount">0 recent samples</small>
+<pre id="latest">Waiting for JSON readings…</pre>
+</section>
+<section>
+<h2>AI agent</h2>
+<p>Forward live readings to Agent.py and display its latest assessment.</p>
+<label>Agent server URL<input id="apiUrl" type="url" value="http://localhost:8765"></label>
+<button id="startAgent">Start forwarding to agent</button>
+<button id="stopAgent" disabled>Stop forwarding</button>
+<p id="agentStatus" role="status">Agent forwarding is off.</p>
+<pre id="assessment">No assessment yet.</pre>
+<small>With forwarding enabled, the latest fresh reading is sent once per second. The agent normally assesses every 10 forwarded readings. It sends readings to Anthropic and automatically submits warnings/critical results to Solana devnet. Stop forwarding to stop sending new data; an in-progress request may still finish. This page cannot retrieve the Arduino's source code.</small>
+</section>
 <script>
-  const connectButton = document.getElementById("connect");
-  const status = document.getElementById("status");
-
-  connectButton.addEventListener("click", async () => {
-    if (!("serial" in navigator)) {
-      status.textContent = "Use desktop Chrome or Edge.";
-      return;
-    }
-
-    let port;
-    let reader;
-
-    try {
-      port = await navigator.serial.requestPort();
-      await port.open({ baudRate: 115200 });
-
-      connectButton.disabled = true;
-      status.textContent = "Connected — waiting for data";
-
-      reader = port.readable.getReader();
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        let newline;
-        while ((newline = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, newline).trim();
-          buffer = buffer.slice(newline + 1);
-
-          if (!line) continue;
-
-          try {
-            const data = JSON.parse(line);
-
-            if (typeof data.button_pressed === "boolean") {
-              status.textContent = data.button_pressed
-                ? "🔴 Button is being pressed"
-                : "⚪ Button is released";
-            }
-          } catch {
-            // Ignore incomplete or invalid messages.
-          }
-        }
+const el = id => document.getElementById(id);
+let port, reader, connecting = false;
+let samples = [], lastSeen = 0, sampleSequence = 0;
+let forwarding = false, agentBase, sentSequence = 0, agentBusy = false, agentGeneration = 0;
+function updateControls() {
+  el('connect').disabled = connecting || Boolean(port);
+  el('disconnect').disabled = !reader;
+  el('startAgent').disabled = forwarding || agentBusy;
+  el('stopAgent').disabled = !forwarding;
+  el('apiUrl').disabled = forwarding || agentBusy;
+}
+function acceptReading(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+  lastSeen = Date.now();
+  sampleSequence += 1;
+  samples.push({ ...data, received_at: new Date(lastSeen).toISOString() });
+  samples = samples.slice(-30);
+  el('status').textContent = 'Connected — receiving readings';
+  el('latest').textContent = JSON.stringify(data, null, 2);
+  el('sampleCount').textContent = `${samples.length} recent samples (maximum 30)`;
+  el('buttonState').textContent = typeof data.button_pressed === 'boolean'
+    ? (data.button_pressed ? '🔴 Button is being pressed' : '⚪ Button is released')
+    : 'Receiving sensor data';
+  updateControls();
+}
+el('connect').addEventListener('click', async () => {
+  if (!('serial' in navigator)) {
+    el('status').textContent = 'Use desktop Chrome or Edge with HTTPS or localhost.';
+    return;
+  }
+  connecting = true;
+  updateControls();
+  samples = []; lastSeen = 0;
+  el('sampleCount').textContent = '0 recent samples';
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    el('status').textContent = 'Connected — waiting for data';
+    reader = port.readable.getReader();
+    updateControls();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        try { acceptReading(JSON.parse(line)); }
+        catch { el('status').textContent = 'Received non-JSON text — check the Arduino output format.'; }
       }
-    } catch (error) {
-      status.textContent = `Connection ended: ${error.message}`;
-    } finally {
-      if (reader) reader.releaseLock();
-
-      if (port) {
-        try {
-          await port.close();
-        } catch {}
+      if (buffer.length > 65536) {
+        buffer = '';
+        el('status').textContent = 'Message too long — send one JSON object per line.';
       }
-
-      connectButton.disabled = false;
     }
-  });
+    el('status').textContent = 'Disconnected';
+  } catch (error) {
+    el('status').textContent = `Connection ended: ${error.message}. Close Serial Monitor and other connected tabs, then retry.`;
+  } finally {
+    if (reader) { reader.releaseLock(); reader = undefined; }
+    if (port) { try { await port.close(); } catch {} }
+    port = undefined; connecting = false;
+    el('buttonState').textContent = 'Button state unknown';
+    updateControls();
+  }
+});
+el('disconnect').addEventListener('click', async () => {
+  el('disconnect').disabled = true;
+  try { if (reader) await reader.cancel(); } catch {}
+});
+setInterval(() => {
+  if (reader && lastSeen && Date.now() - lastSeen > 3000) {
+    el('status').textContent = 'Connected — no recent data';
+    el('buttonState').textContent = 'Button state unknown';
+  }
+  updateControls();
+}, 1000);
+async function agentFetch(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  try {
+    const response = await fetch(new URL(path, agentBase), { ...options, signal: controller.signal });
+    if (!response.ok) throw new Error(`Agent returned HTTP ${response.status}`);
+    return await response.json();
+  } finally { clearTimeout(timeout); }
+}
+function showAssessment(result) {
+  if (!result || !['ok', 'warning', 'critical'].includes(result.status) || typeof result.reason !== 'string') {
+    throw new Error('Invalid response from /status');
+  }
+  el('assessment').textContent = `${result.status.toUpperCase()}: ${result.reason}`;
+}
+el('startAgent').addEventListener('click', async () => {
+  try {
+    agentBase = new URL(el('apiUrl').value.trim());
+    const local = ['localhost', '127.0.0.1'].includes(agentBase.hostname);
+    if (agentBase.protocol !== 'https:' && !(agentBase.protocol === 'http:' && local)) throw new Error();
+  } catch {
+    el('agentStatus').textContent = 'Enter http://localhost:8765 or an HTTPS agent URL.';
+    return;
+  }
+  const generation = ++agentGeneration;
+  forwarding = true; agentBusy = true; updateControls();
+  el('agentStatus').textContent = 'Connecting to agent…';
+  try {
+    const result = await agentFetch('/status');
+    if (generation !== agentGeneration) return;
+    showAssessment(result);
+    sentSequence = 0;
+    el('agentStatus').textContent = 'Agent connected. Fresh Arduino readings will be forwarded once per second.';
+  } catch (error) {
+    if (generation !== agentGeneration) return;
+    forwarding = false;
+    el('agentStatus').textContent = `Agent unavailable: ${error.message}. Start Agent.py --listen 8765. For local testing, serve this page on localhost too; allow browser local-network access if prompted.`;
+  } finally { agentBusy = false; updateControls(); }
+});
+el('stopAgent').addEventListener('click', () => {
+  forwarding = false; agentGeneration += 1;
+  el('agentStatus').textContent = 'Forwarding stopped. A request already sent may still finish on the agent.';
+  updateControls();
+});
+async function forwardLatest() {
+  if (!forwarding || agentBusy) return;
+  if (!reader || !samples.length || Date.now() - lastSeen > 3000) {
+    el('agentStatus').textContent = 'Waiting for fresh Arduino readings. No events are being sent.';
+    return;
+  }
+  if (sentSequence === sampleSequence) return;
+  const generation = agentGeneration;
+  const sequence = sampleSequence;
+  const reading = { ...samples[samples.length - 1] };
+  delete reading.received_at;
+  agentBusy = true; updateControls();
+  try {
+    await agentFetch('/event', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reading),
+    });
+    sentSequence = sequence;
+    if (generation !== agentGeneration) return;
+    const result = await agentFetch('/status');
+    if (generation !== agentGeneration) return;
+    showAssessment(result);
+    el('agentStatus').textContent = `Forwarding — last delivery ${new Date().toLocaleTimeString()}. Assessments update every 10 events with default agent settings.`;
+  } catch (error) {
+    if (generation !== agentGeneration) return;
+    // Do not retry ambiguous POST failures: the agent may have processed them.
+    forwarding = false;
+    el('agentStatus').textContent = `Forwarding paused: ${error.message}. Check the Python terminal, then restart forwarding.`;
+  } finally { agentBusy = false; updateControls(); }
+}
+setInterval(forwardLatest, 1000);
 </script>
+</body>
+</html>
