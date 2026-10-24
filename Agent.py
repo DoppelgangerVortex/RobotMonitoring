@@ -1,3 +1,31 @@
+"""
+Agent that monitors an Arduino and records every non-OK assessment on
+Solana (devnet by default) via the Memo program.
+
+Readings are checked by Claude when an API key is set, or by built-in rules
+when it isn't (free, works offline, less detailed explanations).
+
+Setup:
+    pip install pyserial solana solders
+    pip install anthropic                      optional, only for Claude
+    export ANTHROPIC_API_KEY=your_key          optional (Windows PowerShell:
+                                               $env:ANTHROPIC_API_KEY="your_key")
+
+Run one of:
+    python Agent.py --port /dev/ttyACM0        the agent reads the Arduino itself
+    python Agent.py --listen 8765              dashboard.html reads the Arduino in
+                                               the browser and posts readings here
+
+Useful options:
+    --check-every N     check every N readings (default 30 serial, 10 listen)
+    --rules             use the built-in rules even if an API key is set
+    --no-chain          don't write anything to Solana (handy while testing)
+    --rpc URL           Solana RPC endpoint (default devnet)
+
+On first run it creates agent-wallet.json and requests devnet SOL for it.
+Keep that file private: it is the wallet's secret key.
+Anything written on-chain is public and permanent.
+"""
 
 import argparse
 import hashlib
@@ -9,13 +37,9 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from statistics import median
 from urllib.parse import urlparse
- 
-try:
-    import anthropic
-except ImportError:
-    sys.exit("Missing package: run  pip install anthropic pyserial solana solders")
- 
+
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 WINDOW = 30                 # readings kept in memory and sent to Claude
 CHECK_EVERY = 30            # serial mode: ask Claude every N readings
@@ -26,7 +50,7 @@ MAX_BODY = 64 * 1024
 DEFAULT_RPC = "https://api.devnet.solana.com"
 WALLET_FILE = "agent-wallet.json"
 MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
- 
+
 SYSTEM = (
     "You monitor an Arduino project. You receive its most recent readings as a JSON "
     "array, oldest first. Each reading has a timestamp t (Unix seconds, added on "
@@ -41,7 +65,7 @@ SYSTEM = (
     "problems from real-world events, and say which you think it is.\n"
     "Use only the data provided. Report with the submit_assessment tool."
 )
- 
+
 ASSESS_TOOL = {
     "name": "submit_assessment",
     "description": "Report the assessment of the recent Arduino readings.",
@@ -70,21 +94,21 @@ ASSESS_TOOL = {
         "required": ["status", "reason", "details", "sensors"],
     },
 }
- 
- 
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
- 
- 
+
+
 def log(msg):
     print(f"{time.strftime('%H:%M:%S')}  {msg}", flush=True)
- 
- 
+
+
 # ---------- Solana ----------
- 
+
 class Chain:
     """Writes short memos to Solana. Every failure is reported, never fatal."""
- 
+
     def __init__(self, rpc_url):
         from solana.rpc.api import Client
         from solders.instruction import AccountMeta, Instruction
@@ -92,7 +116,7 @@ class Chain:
         from solders.message import Message
         from solders.pubkey import Pubkey
         from solders.transaction import Transaction
- 
+
         self._AccountMeta, self._Instruction = AccountMeta, Instruction
         self._Message, self._Transaction = Message, Transaction
         self._memo_program = Pubkey.from_string(MEMO_PROGRAM_ID)
@@ -100,7 +124,7 @@ class Chain:
         self.client = Client(rpc_url)
         self.cluster = "devnet" if "devnet" in rpc_url else "testnet" if "testnet" in rpc_url else "mainnet-beta"
         self.wallet = self._load_wallet(Keypair)
- 
+
     def _load_wallet(self, Keypair):
         if os.path.exists(WALLET_FILE):
             with open(WALLET_FILE) as f:
@@ -114,11 +138,11 @@ class Chain:
             pass
         log(f"Created wallet {kp.pubkey()} in {WALLET_FILE} (keep this file private)")
         return kp
- 
+
     @property
     def address(self):
         return str(self.wallet.pubkey())
- 
+
     def ensure_funded(self):
         try:
             bal = self.client.get_balance(self.wallet.pubkey()).value
@@ -144,7 +168,7 @@ class Chain:
             log(f"Airdrop failed ({e}). The devnet faucet is often rate-limited.")
             log(f"Get devnet SOL at https://faucet.solana.com for {self.address}, "
                 "then restart. The agent keeps running meanwhile.")
- 
+
     def log_memo(self, result, readings):
         """Write status, reason and a hash of the evidence. Returns the signature."""
         digest = hashlib.sha256(json.dumps(list(readings), sort_keys=True).encode()).hexdigest()[:16]
@@ -160,10 +184,10 @@ class Chain:
         msg = self._Message.new_with_blockhash([ix], self.wallet.pubkey(), blockhash)
         tx = self._Transaction([self.wallet], msg, blockhash)
         return str(self.client.send_transaction(tx).value)
- 
- 
+
+
 # ---------- Agent ----------
- 
+
 def clean_result(raw):
     """Never let a malformed reply reach the dashboard or the chain."""
     raw = raw if isinstance(raw, dict) else {}
@@ -172,8 +196,8 @@ def clean_result(raw):
     details = str(raw.get("details") or "").strip()[:800]
     sensors = [str(s)[:120] for s in raw.get("sensors", []) if s][:12] if isinstance(raw.get("sensors"), list) else []
     return {"status": status, "reason": reason, "details": details, "sensors": sensors}
- 
- 
+
+
 def assess(claude, readings):
     msg = claude.messages.create(
         model=MODEL,
@@ -185,8 +209,8 @@ def assess(claude, readings):
     )
     block = next((b for b in msg.content if getattr(b, "type", "") == "tool_use"), None)
     return clean_result(block.input if block else None)
- 
- 
+
+
 class Monitor:
     def __init__(self, claude, chain, check_every):
         self.claude = claude
@@ -210,7 +234,7 @@ class Monitor:
         }
         self.assessing = False
         threading.Thread(target=self._worker, daemon=True).start()
- 
+
     # Called for every reading. Returns immediately; Claude runs in the background.
     def ingest(self, reading):
         with self.lock:
@@ -221,7 +245,7 @@ class Monitor:
             due = self.count % self.check_every == 0
         if due:
             self.wake.set()
- 
+
     def status(self):
         with self.lock:
             out = dict(self.result)
@@ -235,7 +259,7 @@ class Monitor:
                 wallet=self.chain.address if self.chain else None,
             )
             return out
- 
+
     def _worker(self):
         while True:
             self.wake.wait()
@@ -260,7 +284,7 @@ class Monitor:
             with self.lock:
                 self.result = result
                 self.assessing = False
- 
+
     def alert(self, result, snapshot):
         """Prints the alert and records it on Solana (fills in signature / chain_error)."""
         log(f"{result['status'].upper()}: {result['reason']}")
@@ -278,10 +302,10 @@ class Monitor:
         except Exception as e:
             result["chain_error"] = f"Solana logging failed: {e}"[:300]
             log(f"  Solana logging failed: {e}")
- 
- 
+
+
 # ---------- HTTP (listen mode) ----------
- 
+
 def make_handler(monitor):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body=b"{}"):
@@ -296,13 +320,13 @@ def make_handler(monitor):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
- 
+
         def _json(self, code, obj):
             self._send(code, json.dumps(obj).encode())
- 
+
         def do_OPTIONS(self):
             self._send(204, b"")
- 
+
         def do_GET(self):
             path = urlparse(self.path).path
             if path == "/status":
@@ -311,7 +335,7 @@ def make_handler(monitor):
                 self._json(200, {"agent": "running", "endpoints": ["GET /status", "POST /event"]})
             else:
                 self._json(404, {"error": "not found"})
- 
+
         def do_POST(self):
             if urlparse(self.path).path != "/event":
                 return self._json(404, {"error": "not found"})
@@ -326,15 +350,15 @@ def make_handler(monitor):
                 return self._json(400, {"error": f"send one JSON object per request ({e})"})
             monitor.ingest(reading)
             self._json(200, {"ok": True, "events_received": monitor.count})
- 
+
         def log_message(self, *args):
             pass
- 
+
     return Handler
- 
- 
+
+
 # ---------- Serial mode ----------
- 
+
 def run_serial(monitor, port, baud):
     try:
         import serial
@@ -369,8 +393,8 @@ def run_serial(monitor, port, baud):
             last_seen = time.time()
             outage_reported = False
             monitor.ingest(reading)
- 
- 
+
+
 def main():
     ap = argparse.ArgumentParser(description="Arduino monitoring agent")
     ap.add_argument("--port", help="serial port; the agent reads the Arduino directly")
@@ -387,11 +411,11 @@ def main():
         ap.error("choose exactly one of --port or --listen")
     if args.check_every is not None and args.check_every < 1:
         ap.error("--check-every must be at least 1")
- 
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("ANTHROPIC_API_KEY is not set. Set it in this terminal, then run again.")
     claude = anthropic.Anthropic()
- 
+
     chain = None
     if not args.no_chain:
         try:
@@ -402,9 +426,9 @@ def main():
         if chain.cluster == "mainnet-beta":
             log("WARNING: logging to Solana mainnet costs real SOL for every alert.")
         chain.ensure_funded()
- 
+
     monitor = Monitor(claude, chain, args.check_every or (CHECK_EVERY_LISTEN if args.listen else CHECK_EVERY))
- 
+
     if args.listen:
         server = ThreadingHTTPServer(("127.0.0.1", args.listen), make_handler(monitor))
         log(f"Agent listening on http://localhost:{args.listen}  (Ctrl+C to stop)")
@@ -419,8 +443,7 @@ def main():
             run_serial(monitor, args.port, args.baud)
         except KeyboardInterrupt:
             log("Stopped.")
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
