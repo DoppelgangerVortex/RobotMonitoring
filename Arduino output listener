@@ -1,0 +1,71 @@
+//HTML code snippet to read the output given by the Arduino
+
+<button id="connect">Connect Arduino</button>
+<p id="status">Disconnected</p>
+
+<script>
+  const connectButton = document.getElementById("connect");
+  const status = document.getElementById("status");
+
+  connectButton.addEventListener("click", async () => {
+    if (!("serial" in navigator)) {
+      status.textContent = "Use desktop Chrome or Edge.";
+      return;
+    }
+
+    let port;
+    let reader;
+
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+
+      connectButton.disabled = true;
+      status.textContent = "Connected — waiting for data";
+
+      reader = port.readable.getReader();
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        let newline;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+
+          if (!line) continue;
+
+          try {
+            const data = JSON.parse(line);
+
+            if (typeof data.button_pressed === "boolean") {
+              status.textContent = data.button_pressed
+                ? "🔴 Button is being pressed"
+                : "⚪ Button is released";
+            }
+          } catch {
+            // Ignore incomplete or invalid messages.
+          }
+        }
+      }
+    } catch (error) {
+      status.textContent = `Connection ended: ${error.message}`;
+    } finally {
+      if (reader) reader.releaseLock();
+
+      if (port) {
+        try {
+          await port.close();
+        } catch {}
+      }
+
+      connectButton.disabled = false;
+    }
+  });
+</script>
